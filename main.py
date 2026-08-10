@@ -1,92 +1,93 @@
-import sys 
 import asyncio
+import argparse
 
 async def portscan(ip, port, sem):
-    writer = None
     banner = b""
-    flag_b = False
+    is_open = False
+    
     async with sem:
         try:
+            # 1. First try to open the connection
             async with asyncio.timeout(3):
                 reader, writer = await asyncio.open_connection(ip, port)
+            
+            is_open = True  # If we reach here, the port is open
 
-            async with asyncio.timeout(1):
-                banner = await reader.read(512)
-
-            if banner:
-                flag_b = True
-
-            return [port, flag_b, banner]
+            # 2. Then try to grab the banner
+            try:
+                async with asyncio.timeout(1):
+                    banner = await reader.read(512)
+            except TimeoutError:
+                # Port is open, but no banner was sent in time
+                pass
 
         except Exception:
-            return [port, flag_b, banner]
+            # Connection failed (closed/filtered)
+            pass
 
         finally:
-            if writer is not None:
+            # Safely clean up the connection if it was created
+            if 'writer' in locals() and writer is not None:
                 writer.close()
                 await writer.wait_closed()
+                
+        return port, is_open, banner
+
+def get_ports(args):
+    """Helper function to figure out which ports to scan based on arguments."""
+    top_ports = [21,22,23,25,53,80,110,111,135,139,143,443,445,993,995,1433,1521,1723,3306,3389,5432,5900,6379,8080]
+    
+    if args.top:
+        return top_ports
+    
+    if args.ports:
+        if '-' in args.ports:
+            # Handle range (e.g., 20-80)
+            start, end = args.ports.split('-')
+            return list(range(int(start), int(end) + 1))
+        elif ',' in args.ports:
+            # Handle comma separated (e.g., 22,80,443)
+            return [int(p) for p in args.ports.split(',')]
+        else:
+            # Handle single port
+            return [int(args.ports)]
+            
+    # Default to top ports if nothing was provided
+    return top_ports
 
 async def main():
-    try:
-        if sys.argv[1] == "-help":
-                print("Usage: Port_scanner.py -i [ip address] -p{-top} [port|range|multi]")
+    parser = argparse.ArgumentParser(description="Asyncio Port Scanner")
+    parser.add_argument('-i', dest='ip', required=True, help="IP address to scan")
+    
+    # Create a mutually exclusive group so the user can't use -p and -top at the same time
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('-p', dest='ports', help="Port(s) to scan (single, range x-y, or multi x,y,z)")
+    group.add_argument('-top', action='store_true', help="Scan top common ports")
+
+    args = parser.parse_args()
+
+    ip = args.ip
+    ports_to_scan = get_ports(args)
+    sem = asyncio.Semaphore(200)
+    
+    print(f"Scanning {len(ports_to_scan)} ports on {ip}...")
+
+    # Create and gather all tasks
+    tasks = [asyncio.create_task(portscan(ip, port, sem)) for port in ports_to_scan]
+    results = await asyncio.gather(*tasks)
+
+    # Print results - format: port open/closed banner
+    for port, is_open, banner in results:
+        if banner:
+            # .strip() removes trailing newlines from the banner for cleaner output
+            clean_banner = banner.decode(errors='replace').strip()
+            print(f"{port} {is_open} {clean_banner}")
         else:
-            sem = asyncio.Semaphore(200)
-            tasks = []
-            top = [21,22,23,25,53,80,110,111,135,139,143,443,445,993,995,1433,1521,1723,3306,3389,5432,5900,6379,8080]
-            ip = sys.argv[2] 
-            result = [] #[port, open_closed, banners]
-            if sys.argv[1] == "-i" and sys.argv[3] == "-p":
-                portr = sys.argv[4].split('-')
-                ports = sys.argv[4].split(',')
-                flag_t = False
-                if len(ports) > 1:
-                    flag_p = True
-                else:
-                    flag_p = False
-            else:
-                flag_t = True
-            #print(portr)
-            if sys.argv[1] == "-i" and not flag_t:
-                if len(portr) != 2 and not flag_p:
-                    result = [await portscan(ip, int(portr[0]), sem)]
-                elif len(portr) == 2:
-                    for i in range(int(portr[0]), int(portr[1])):
-                        tasks.append(asyncio.create_task(portscan(ip,i,sem))) #asyncio.create_task(portscan("192.168.1.6",i,sem))
-                    result = await asyncio.gather(*tasks)
-                else:
-                    for p in range(0,len(ports)):
-                        tasks.append(asyncio.create_task(portscan(ip,ports[p],sem)))
-                    result = await asyncio.gather(*tasks)
-            elif sys.argv[1] == "-i" and flag_t:
-                for t in top:
-                    tasks.append(asyncio.create_task(portscan(ip,t,sem)))
-                result = await asyncio.gather(*tasks)
-            #print(result)
+            print(f"{port} {is_open}")
 
-            #result printing - [port, open(true) or closed(false), banner]
-            for res in result:
-                # if res[1]:
-                #     if res[2]:
-                #         print(f"{res[0]} OPEN {res[2].decode(errors='replace')}")
-                #     else: 
-                #         print(f"{res[0]} OPEN")
-                if res[2]:
-                    print(f"{res[0]} {res[1]} {res[2].decode(errors='replace')}")
-                else:
-                    print(f"{res[0]} {res[1]}")
-    except IndexError as e:
-        # print("Usage: Port_scanner.py -i [ip address] -p{-top} [port|range|multi]")
-        print("Usage: Port_scanner.py -help")
-        # print("debug 1")
-        # print(e)
-
-
-while True:
+if __name__ == "__main__":
     try:
+        # This is the modern Python way to run an async main function
         asyncio.run(main())
-        break
-    except Exception as e:
-        print("Usage: Port_scanner.py -i [ip address] -p [port]")
-        print(e)
-        break
+    except KeyboardInterrupt:
+        print("\nScan interrupted by user.")
